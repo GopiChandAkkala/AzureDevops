@@ -1,0 +1,77 @@
+trigger:
+      branches:
+        include: 
+        - master
+        - Release_*
+        - topic/*
+
+pool:
+  name: scm-sd
+  
+workspace:
+  #clean: outputs | resources | all # what to clean up before the job runs #
+  clean: all
+
+variables:
+  buildPlatform: 'Any CPU'
+  buildConfiguration: 'Release'
+  ScmBuildProject: 'devopsnspapp'
+  ScmOfficialBuildOn: 'refs/heads/Release_'
+  ScmTasksId: 'scm-common-build-tasks'
+  ScmTasksVersion: '1.0.0.50'
+  ScmTasksNugetFeed: 'https://pkgs.dev.azure.com/BD-STS-PROD/SCM/_packaging/scm/nuget/v3/index.json'
+
+steps:
+- checkout: self
+  persistCredentials: true
+  submodules: true
+
+- task: NuGetCommand@2
+  displayName: 'NuGet install scm common build tasks'
+  inputs:
+    command: custom
+    arguments: 'install $(ScmTasksId) -Version $(ScmTasksVersion) -OutputDirectory $(Agent.BuildDirectory) -Source $(ScmTasksNugetFeed)'
+
+#SCM Initial Task
+- task: PowerShell@2
+  displayName: 'SCM Get build number'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+  inputs:
+    filePath: '$(Agent.BuildDirectory)/$(ScmTasksId).$(ScmTasksVersion)\scm-get-build-number.ps1' 
+
+#SCM Build Tasks
+- task: PowerShell@2
+  displayName: 'SCM Stage files for deployment package'
+  inputs:
+    filePath: '$(Agent.BuildDirectory)/$(ScmTasksId).$(ScmTasksVersion)\scm-stage-files-azure-infra-functions.ps1' 
+
+- task: NuGetCommand@2
+  displayName: 'SCM - NuGet pack for deployment'
+  inputs:
+    command: pack
+    packagesToPack: '$(Agent.BuildDirectory)\deploy\**\*.nuspec'
+
+- task: octopusdeploy.octopus-deploy-build-release-tasks.octopus-push.OctopusPush@3
+  displayName: 'SCM - Push Packages to Octopus'
+  inputs:
+    OctoConnectedServiceName: 'https://hs-octopus.cfnp.local'
+    Package: '$(Build.ArtifactStagingDirectory)/*.nupkg'
+    Space: 'Cloud'
+  continueOnError: true
+  condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], variables['ScmOfficialBuildOn']))
+
+#SCM Final Task
+- task: PowerShell@2
+  displayName: 'scm - set build number and retain build'
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+  inputs:
+    filePath: '$(Agent.BuildDirectory)/$(ScmTasksId).$(ScmTasksVersion)\scm-set-build-number-and-retain-build.ps1' 
+  condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], variables['ScmOfficialBuildOn']))
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Artifact: $(ScmBuildName)'
+  inputs:
+    PathtoPublish: '$(build.artifactstagingdirectory)'
+    ArtifactName: '$(ScmBuildName)'
